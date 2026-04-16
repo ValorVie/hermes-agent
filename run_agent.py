@@ -3889,6 +3889,38 @@ class AIAgent:
 
         return not self._has_natural_response_ending(visible_text)
 
+    def _check_rockspec_stop_contract(self) -> str | None:
+        """Prompt the agent to check and update its rockspec-loop state.
+
+        Returns a continuation prompt if ROCKSPEC_LOOP=true is present
+        in the channel_prompt.  The agent is responsible for reading the
+        state file, updating heartbeat/progress, and deciding whether
+        the stop contract allows stopping.
+
+        Returns None (allow stop) if the channel has no ROCKSPEC_LOOP flag.
+        The caller caps continuations at 5 to prevent infinite loops.
+        """
+        prompt = getattr(self, "ephemeral_system_prompt", "") or ""
+        if "ROCKSPEC_LOOP=true" not in prompt:
+            return None
+        return (
+            "[System: ROCKSPEC-LOOP STOP CONTRACT CHECK — Do NOT respond "
+            "with text. Execute the following steps using tools:\n"
+            "\n"
+            "1. Find .rockspec-loop/state/current.yaml from your default "
+            "working directory (check .worktrees/*/ too).\n"
+            "2. Read it. If not found, you may stop.\n"
+            "3. If loop_paused is true, you may stop.\n"
+            "4. If status is not in_progress, you may stop.\n"
+            "5. If next_action is empty, you may stop.\n"
+            "6. Otherwise, the stop contract is UNSATISFIED. You must:\n"
+            "   a. Update last_heartbeat_at to current UTC time.\n"
+            "   b. Update last_progress_summary with what you just did.\n"
+            "   c. Write the updated state back to the file.\n"
+            "   d. Continue executing the task described in next_action.\n"
+            "      Do NOT summarize or report — just do the work.]"
+        )
+
     def _looks_like_codex_intermediate_ack(
         self,
         user_message: str,
@@ -12515,6 +12547,7 @@ class AIAgent:
         final_response = None
         interrupted = False
         codex_ack_continuations = 0
+        self._rockspec_contract_continuations = 0  # VALOR-FORK: rockspec-loop-hook
         length_continue_retries = 0
         truncated_tool_call_retries = 0
         truncated_response_parts: List[str] = []
@@ -15719,7 +15752,46 @@ class AIAgent:
                         messages.pop()
 
                     messages.append(final_msg)
-                    
+
+                    # ── rockspec-loop stop contract hook ──────────────
+                    # Before breaking out of the loop, check if a
+                    # rockspec-loop state file indicates work is still
+                    # in progress.  If the stop contract is unsatisfied,
+                    # inject a continuation prompt so the agent keeps
+                    # going instead of stopping prematurely.
+                    # ROCKSPEC_LOOP_MAX_CONTINUATIONS: 0 = unlimited
+                    # (still bounded by max_iterations), default 5.
+                    # Only actual interceptions count.
+                    # VALOR-FORK: rockspec-loop-hook
+                    try:
+                        _rs_max = int(os.getenv("ROCKSPEC_LOOP_MAX_CONTINUATIONS", "5"))
+                    except (ValueError, TypeError):
+                        _rs_max = 5
+                    _rs_count = getattr(self, "_rockspec_contract_continuations", 0)
+                    if (
+                        self.valid_tool_names
+                        and (_rs_max == 0 or _rs_count < _rs_max)
+                    ):
+                        _rs_continue = self._check_rockspec_stop_contract()
+                        if _rs_continue:
+                            self._rockspec_contract_continuations = getattr(
+                                self, "_rockspec_contract_continuations", 0
+                            ) + 1
+                            self._emit_interim_assistant_message(final_msg)
+                            messages.append({
+                                "role": "user",
+                                "content": _rs_continue,
+                            })
+                            self._session_messages = messages
+                            self._save_session_log(messages)
+                            logger.info(
+                                "rockspec-loop stop contract unsatisfied — "
+                                "injecting continuation (#%d, max=%s)",
+                                self._rockspec_contract_continuations,
+                                _rs_max or "unlimited",
+                            )
+                            continue
+
                     _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                     if not self.quiet_mode:
                         self._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
