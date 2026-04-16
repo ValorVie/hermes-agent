@@ -3327,8 +3327,9 @@ class DiscordAdapter(BasePlatformAdapter):
                     )
                     return
                 _desc, cmd_key = entry
+                label = f"`{cmd_key} {args}`".strip() if args else f"`{cmd_key}`"
                 await self._run_simple_slash(
-                    interaction, f"{cmd_key} {args}".strip()
+                    interaction, f"{cmd_key} {args}".strip(), label
                 )
 
             cmd = discord.app_commands.Command(
