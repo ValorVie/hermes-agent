@@ -3890,40 +3890,77 @@ class AIAgent:
         return not self._has_natural_response_ending(visible_text)
 
     def _check_rockspec_stop_contract(self) -> str | None:
-        """Prompt the agent to check and update its rockspec-loop state.
+        """Check rockspec-loop state file and return continuation prompt if needed.
 
-        Returns a continuation prompt if ROCKSPEC_LOOP=true is present
-        in the channel_prompt.  The agent is responsible for reading the
-        state file, updating heartbeat/progress, and deciding whether
-        the stop contract allows stopping.
+        Parses DEFAULT_WORKING_DIRECTORY from ephemeral_system_prompt to
+        locate the state file.  Reads and evaluates the stop contract in
+        Python — only returns a continuation prompt when the contract is
+        genuinely unsatisfied, avoiding wasted API calls.
 
-        Returns None (allow stop) if the channel has no ROCKSPEC_LOOP flag.
-        The caller caps continuations at 5 to prevent infinite loops.
+        Returns None (allow stop) when:
+        - No DEFAULT_WORKING_DIRECTORY in channel prompt
+        - No state file found
+        - loop_paused is true
+        - status is not in_progress
+        - next_action is empty
         """
         prompt = getattr(self, "ephemeral_system_prompt", "") or ""
-        if "ROCKSPEC_LOOP=true" not in prompt:
+        repo_root = None
+        for line in prompt.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("DEFAULT_WORKING_DIRECTORY="):
+                raw = stripped.split("=", 1)[1].strip()
+                repo_root = Path(raw).expanduser()
+                break
+        if repo_root is None or not repo_root.is_dir():
             return None
+
+        state_path = self._find_rockspec_state(repo_root)
+        if state_path is None:
+            return None
+
+        try:
+            import json as _json
+            state = _json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        if state.get("loop_paused"):
+            return None
+        if str(state.get("status", "")).strip() != "in_progress":
+            return None
+        next_action = str(state.get("next_action", "")).strip()
+        if not next_action:
+            return None
+
         return (
-            "[System: ROCKSPEC-LOOP STOP CONTRACT CHECK — Execute the "
-            "following steps using tools:\n"
+            "[System: ROCKSPEC-LOOP STOP CONTRACT UNSATISFIED — "
+            "The state file has been checked and the contract is NOT met.\n"
+            f"State file: {state_path}\n"
+            f"next_action: {next_action}\n"
             "\n"
-            "1. Find .rockspec-loop/state/current.yaml from your default "
-            "working directory (check .worktrees/*/ too).\n"
-            "2. Read it. If not found, respond with a brief completion "
-            "summary and stop.\n"
-            "3. If loop_paused is true, respond with a brief completion "
-            "summary and stop.\n"
-            "4. If status is not in_progress, respond with a brief "
-            "completion summary and stop.\n"
-            "5. If next_action is empty, respond with a brief completion "
-            "summary and stop.\n"
-            "6. Otherwise, the stop contract is UNSATISFIED. You must:\n"
-            "   a. Update last_heartbeat_at to current UTC time.\n"
-            "   b. Update last_progress_summary with what you just did.\n"
-            "   c. Write the updated state back to the file.\n"
-            "   d. Continue executing the task described in next_action.\n"
-            "      Do NOT summarize or report — just do the work.]"
+            "You must:\n"
+            "1. Update last_heartbeat_at to current UTC time in the state file.\n"
+            "2. Update last_progress_summary with what you just did.\n"
+            "3. Write the updated state back to the file.\n"
+            "4. Continue executing the task described in next_action.\n"
+            "   Do NOT summarize or report — just do the work.]"
         )
+
+    @staticmethod
+    def _find_rockspec_state(repo_root: Path) -> Path | None:
+        """Find .rockspec-loop/state/current.yaml under repo_root or its worktrees."""
+        candidate = repo_root / ".rockspec-loop" / "state" / "current.yaml"
+        if candidate.is_file():
+            return candidate
+        worktrees = repo_root / ".worktrees"
+        if worktrees.is_dir():
+            for wt in worktrees.iterdir():
+                if wt.is_dir():
+                    candidate = wt / ".rockspec-loop" / "state" / "current.yaml"
+                    if candidate.is_file():
+                        return candidate
+        return None
 
     def _looks_like_codex_intermediate_ack(
         self,
