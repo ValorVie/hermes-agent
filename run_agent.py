@@ -3920,9 +3920,9 @@ class AIAgent:
             return None
 
         try:
-            import json as _json
-            state = _json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Failed to parse rockspec state file %s: %s", state_path, exc)
             return None
 
         if state.get("loop_paused"):
