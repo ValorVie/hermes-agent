@@ -12552,6 +12552,7 @@ class AIAgent:
         interrupted = False
         codex_ack_continuations = 0
         self._rockspec_contract_continuations = 0  # VALOR-FORK: rockspec-loop-hook
+        self._rockspec_prev_was_hook = False  # VALOR-FORK: rockspec-loop-hook
         length_continue_retries = 0
         truncated_tool_call_retries = 0
         truncated_response_parts: List[str] = []
@@ -15526,6 +15527,7 @@ class AIAgent:
                             _prior_was_tool
                             and not getattr(self, "_post_tool_empty_retried", False)
                             and not _has_inline_thinking  # thinking model still working — let prefill handle
+                            and not getattr(self, "_rockspec_prev_was_hook", False)
                         ):
                             self._post_tool_empty_retried = True
                             # Clear stale narration so it doesn't resurface
@@ -15767,34 +15769,46 @@ class AIAgent:
                     # (still bounded by max_iterations), default 5.
                     # Only actual interceptions count.
                     # VALOR-FORK: rockspec-loop-hook
-                    try:
-                        _rs_max = int(os.getenv("ROCKSPEC_LOOP_MAX_CONTINUATIONS", "5"))
-                    except (ValueError, TypeError):
-                        _rs_max = 5
-                    _rs_count = getattr(self, "_rockspec_contract_continuations", 0)
-                    if (
-                        self.valid_tool_names
-                        and (_rs_max == 0 or _rs_count < _rs_max)
-                    ):
-                        _rs_continue = self._check_rockspec_stop_contract()
-                        if _rs_continue:
-                            self._rockspec_contract_continuations = getattr(
-                                self, "_rockspec_contract_continuations", 0
-                            ) + 1
-                            self._emit_interim_assistant_message(final_msg)
-                            messages.append({
-                                "role": "user",
-                                "content": _rs_continue,
-                            })
-                            self._session_messages = messages
-                            self._save_session_log(messages)
-                            logger.info(
-                                "rockspec-loop stop contract unsatisfied — "
-                                "injecting continuation (#%d, max=%s)",
-                                self._rockspec_contract_continuations,
-                                _rs_max or "unlimited",
-                            )
-                            continue
+                    # After a hook continuation, if the agent came back with
+                    # text-only (no further tool calls to continue work), it
+                    # has confirmed the stop contract — do not fire again.
+                    _rs_prev = getattr(self, "_rockspec_prev_was_hook", False)
+                    self._rockspec_prev_was_hook = False
+                    if not _rs_prev:
+                        try:
+                            _rs_max = int(os.getenv("ROCKSPEC_LOOP_MAX_CONTINUATIONS", "5"))
+                        except (ValueError, TypeError):
+                            _rs_max = 5
+                        _rs_count = getattr(self, "_rockspec_contract_continuations", 0)
+                        if (
+                            self.valid_tool_names
+                            and (_rs_max == 0 or _rs_count < _rs_max)
+                        ):
+                            _rs_continue = self._check_rockspec_stop_contract()
+                            if _rs_continue:
+                                self._rockspec_contract_continuations = getattr(
+                                    self, "_rockspec_contract_continuations", 0
+                                ) + 1
+                                self._rockspec_prev_was_hook = True
+                                self._emit_interim_assistant_message(final_msg)
+                                messages.append({
+                                    "role": "user",
+                                    "content": _rs_continue,
+                                })
+                                self._session_messages = messages
+                                self._save_session_log(messages)
+                                logger.info(
+                                    "rockspec-loop stop contract unsatisfied — "
+                                    "injecting continuation (#%d, max=%s)",
+                                    self._rockspec_contract_continuations,
+                                    _rs_max or "unlimited",
+                                )
+                                continue
+                    else:
+                        logger.info(
+                            "rockspec-loop hook skipped — agent confirmed "
+                            "stop after previous hook check"
+                        )
 
                     _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                     if not self.quiet_mode:
