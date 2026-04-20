@@ -3889,7 +3889,83 @@ class AIAgent:
 
         return not self._has_natural_response_ending(visible_text)
 
-    def _check_rockspec_stop_contract(self) -> str | None:
+    def _resolve_rockspec_state_path(self) -> Path | None:
+        """Locate the active rockspec-loop state file via ephemeral_system_prompt.
+
+        VALOR-FORK: rockspec-loop-hook / rockspec-loop-hook-fallback
+        Returns None when no DEFAULT_WORKING_DIRECTORY is configured or the
+        path holds no state file.
+        """
+        prompt = getattr(self, "ephemeral_system_prompt", "") or ""
+        repo_root = None
+        for line in prompt.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("DEFAULT_WORKING_DIRECTORY="):
+                raw = stripped.split("=", 1)[1].strip()
+                repo_root = Path(raw).expanduser()
+                break
+        if repo_root is None or not repo_root.is_dir():
+            return None
+        return self._find_rockspec_state(repo_root)
+
+    def _read_rockspec_state_seq(self) -> int | None:
+        """Read current state_seq from the active state file, or None if unavailable.
+
+        VALOR-FORK: rockspec-loop-hook-fallback
+        Used at turn init to snapshot state_seq so the hook can detect whether
+        the agent has written to state during the turn.
+        """
+        state_path = self._resolve_rockspec_state_path()
+        if state_path is None:
+            return None
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            seq = state.get("state_seq")
+            return int(seq) if isinstance(seq, (int, float, str)) and str(seq).strip() else None
+        except Exception:
+            return None
+
+    def _log_rockspec_hook_decision(
+        self,
+        *,
+        action: str,
+        state_seq_after: int | None,
+        is_hook_injected: bool | None,
+        agent_touched_state: bool | None,
+        last_user_msg: str | None,
+    ) -> None:
+        """Emit a single structured INFO log for each hook invocation.
+
+        VALOR-FORK: rockspec-loop-hook-fallback
+        """
+        preview = ""
+        if isinstance(last_user_msg, str):
+            compact = last_user_msg.replace("\n", " ").replace("\r", " ").strip()
+            preview = compact[:80]
+        seq_before = getattr(self, "_rockspec_turn_state_seq_before", None)
+        _rs_count = getattr(self, "_rockspec_contract_continuations", 0)
+        try:
+            _rs_max_env = os.getenv("ROCKSPEC_LOOP_MAX_CONTINUATIONS", "5")
+            _rs_max = int(_rs_max_env)
+        except (ValueError, TypeError):
+            _rs_max = 5
+        session_id = getattr(self, "session_id", None) or getattr(self, "_session_id", None) or "-"
+        logger.info(
+            "rockspec-loop hook decision: action=%s session=%s "
+            "user_msg_preview=%r is_hook_injected=%s agent_touched_state=%s "
+            "state_seq_before=%s state_seq_after=%s continuation_count=%d/%s",
+            action,
+            session_id,
+            preview,
+            is_hook_injected,
+            agent_touched_state,
+            seq_before,
+            state_seq_after,
+            _rs_count,
+            _rs_max if _rs_max != 0 else "unlimited",
+        )
+
+    def _check_rockspec_stop_contract(self, messages: list | None = None) -> str | None:
         """Check rockspec-loop state file and return continuation prompt if needed.
 
         Parses DEFAULT_WORKING_DIRECTORY from ephemeral_system_prompt to
@@ -3903,36 +3979,89 @@ class AIAgent:
         - loop_paused is true
         - status is not in_progress
         - next_action is empty
+        - VALOR-FORK: rockspec-loop-hook-fallback — external user input and
+          agent already wrote state this turn
+        Emits one structured INFO log per invocation regardless of outcome.
         """
-        prompt = getattr(self, "ephemeral_system_prompt", "") or ""
-        repo_root = None
-        for line in prompt.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("DEFAULT_WORKING_DIRECTORY="):
-                raw = stripped.split("=", 1)[1].strip()
-                repo_root = Path(raw).expanduser()
-                break
-        if repo_root is None or not repo_root.is_dir():
-            return None
+        state_path = self._resolve_rockspec_state_path()
 
-        state_path = self._find_rockspec_state(repo_root)
+        action: str = "inject"
+        state: dict | None = None
+        state_seq_after: int | None = None
+        is_hook_injected: bool | None = None
+        agent_touched_state: bool | None = None
+        last_user_msg: str | None = None
+
         if state_path is None:
+            action = (
+                "bypass_no_working_dir"
+                if not any(
+                    line.strip().startswith("DEFAULT_WORKING_DIRECTORY=")
+                    for line in (getattr(self, "ephemeral_system_prompt", "") or "").splitlines()
+                )
+                else "bypass_no_state"
+            )
+        else:
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                seq = state.get("state_seq")
+                state_seq_after = int(seq) if isinstance(seq, (int, float, str)) and str(seq).strip() else None
+            except Exception as exc:
+                logger.warning("Failed to parse rockspec state file %s: %s", state_path, exc)
+                action = "bypass_parse_error"
+                state = None
+
+        if state is not None:
+            if state.get("loop_paused"):
+                action = "bypass_loop_paused"
+            elif str(state.get("status", "")).strip() != "in_progress":
+                action = "bypass_not_in_progress"
+            else:
+                next_action = str(state.get("next_action", "")).strip()
+                if not next_action:
+                    action = "bypass_empty_next_action"
+                else:
+                    # Gates pass — evaluate fallback guard.
+                    msgs = messages or getattr(self, "_session_messages", None) or []
+                    for m in reversed(msgs):
+                        if isinstance(m, dict) and m.get("role") == "user":
+                            c = m.get("content", "")
+                            if isinstance(c, str):
+                                last_user_msg = c
+                                break
+                            if isinstance(c, list):
+                                for part in c:
+                                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                                        last_user_msg = part["text"]
+                                        break
+                                if last_user_msg is not None:
+                                    break
+                    is_hook_injected = bool(last_user_msg) and last_user_msg.startswith(
+                        "[System: ROCKSPEC-LOOP STOP CONTRACT UNSATISFIED"
+                    )
+                    seq_before = getattr(self, "_rockspec_turn_state_seq_before", None)
+                    agent_touched_state = (
+                        state_seq_after is not None
+                        and seq_before is not None
+                        and state_seq_after > seq_before
+                    )
+                    if (not is_hook_injected) and agent_touched_state:
+                        action = "bypass_fallback"
+                    else:
+                        action = "inject"
+
+        self._log_rockspec_hook_decision(
+            action=action,
+            state_seq_after=state_seq_after,
+            is_hook_injected=is_hook_injected,
+            agent_touched_state=agent_touched_state,
+            last_user_msg=last_user_msg,
+        )
+
+        if action != "inject" or state is None or state_path is None:
             return None
 
-        try:
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning("Failed to parse rockspec state file %s: %s", state_path, exc)
-            return None
-
-        if state.get("loop_paused"):
-            return None
-        if str(state.get("status", "")).strip() != "in_progress":
-            return None
         next_action = str(state.get("next_action", "")).strip()
-        if not next_action:
-            return None
-
         return (
             "[System: ROCKSPEC-LOOP STOP CONTRACT UNSATISFIED — "
             "The state file has been checked and the contract is NOT met.\n"
@@ -12590,6 +12719,7 @@ class AIAgent:
         codex_ack_continuations = 0
         self._rockspec_contract_continuations = 0  # VALOR-FORK: rockspec-loop-hook
         self._rockspec_prev_was_hook = False  # VALOR-FORK: rockspec-loop-hook
+        self._rockspec_turn_state_seq_before = self._read_rockspec_state_seq()  # VALOR-FORK: rockspec-loop-hook-fallback
         length_continue_retries = 0
         truncated_tool_call_retries = 0
         truncated_response_parts: List[str] = []
@@ -15821,7 +15951,7 @@ class AIAgent:
                             self.valid_tool_names
                             and (_rs_max == 0 or _rs_count < _rs_max)
                         ):
-                            _rs_continue = self._check_rockspec_stop_contract()
+                            _rs_continue = self._check_rockspec_stop_contract(messages=messages)
                             if _rs_continue:
                                 self._rockspec_contract_continuations = getattr(
                                     self, "_rockspec_contract_continuations", 0
