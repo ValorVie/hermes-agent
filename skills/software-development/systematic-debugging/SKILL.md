@@ -17,6 +17,21 @@ metadata:
 
 Random fixes waste time and create new bugs. Quick patches mask underlying issues.
 
+## Clipboard / Native-Action Proxy Bugs
+
+When a browser UI extension, userscript, or automation tries to infer state from DOM but the native product action already knows the correct target, treat the native action as the source of truth before adding more DOM heuristics.
+
+Use this pattern:
+1. Reproduce the mismatch: compare direct custom action vs. native action followed by custom action.
+2. If native action refreshes the correct internal target, proxy through the native action instead of scraping wider DOM containers.
+3. Write a non-URL sentinel to the clipboard before invoking the native action, then verify the same readable clipboard can observe the sentinel.
+4. Trigger the native action, poll until clipboard changes from sentinel, validate the result domain/path, normalize it, then overwrite with the cleaned value.
+5. On timeout, invalid content, or unreadable clipboard, restore the previous clipboard and fail closed.
+6. Add sequence guards after every `await` and before every side effect so superseded operations cannot restore stale content, write stale sentinels, or click the native action late.
+7. Add regression tests for stale previous clipboard, async native update, invalid native output, sentinel-not-observable, native timeout, menu reuse, and rapid double-click races.
+
+See `references/clipboard-native-proxy.md` for the condensed case notes.
+
 **Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.
 
 **Violating the letter of this process is violating the spirit of debugging.**
@@ -123,6 +138,21 @@ for i in {1..100}; do pytest tests/test_flake.py::test_name -q || break; done
 - What changed that could cause this?
 - Git diff, recent commits
 - New dependencies, config changes
+- Environmental differences
+- When a stakeholder says a behavior "used to work," do Git archaeology before accepting either side of the timeline:
+  - Inspect the current fix commits and the pre-fix parent.
+  - Use `git log -S` / `git log -G` on the relevant symbol and condition.
+  - Use `git blame` on the pre-fix parent, not only on current HEAD.
+  - Search all visible refs when the expected historical version is not on `master`.
+  - Call out the boundary between "visible Git history proves X" and "older production backup or pre-import code may differ."
+  - For the concise command sequence, see `references/git-history-forensics.md`.
+
+**When asked to pull or inspect latest main/master for a production bug:**
+   - Fetch first (`git fetch origin <branch> --prune`) so remote evidence is current without changing the worktree
+   - Check branch divergence and dirtiness before integrating: `git status --short --branch`, `git rev-list --left-right --count HEAD...origin/<branch>`
+   - If local branch is dirty or diverged, do **not** silently merge/rebase/reset. Inspect `HEAD..origin/<branch>` directly and report the integration blocker.
+   - Use path-limited history/diff for the suspected surface, e.g. `git log HEAD..origin/<branch> -- path/to/file` and `git show <commit> -- path/to/file`.
+   - Separate three facts in the report: fetched remote commits, whether local worktree was actually updated, and which remote commits touched the suspect files.
 
 **Action:**
 
@@ -152,6 +182,8 @@ For EACH component boundary:
 Run once to gather evidence showing WHERE it breaks.
 THEN analyze evidence to identify the failing component.
 THEN investigate that specific component.
+
+**Silent-failure API pitfall:** Some APIs signal failure by returning `false` or `null` instead of throwing (for example PHP PDO with `ERRMODE_SILENT`). When debugging missing data, do not only catch exceptions; check false/null returns and log diagnostic state such as `errorInfo()` without leaking credentials.
 
 ### 5. Trace Data Flow
 
@@ -226,6 +258,14 @@ search_files("similar_pattern", path="src/", file_glob="*.py")
 - What settings, config, environment?
 - What assumptions does it make?
 
+### 5. Separate Control-Flow from Enrichment
+
+- In automation state machines, distinguish the state invariant from recognition quality.
+- Example: "a settlement/result screen is actionable" is separate from "the OCR name matched a catalog".
+- Check whether downstream storage already supports degraded data (unknown labels, raw OCR, partial measurements).
+- If it does, do not let taxonomy matching, fuzzy naming, or OCR canonicalization block liveness; use guarded fallbacks and record lower-confidence data.
+- Add paired tests: degraded-but-valid evidence advances; weak evidence without guards does not.
+
 ---
 
 ## Phase 3: Hypothesis and Testing
@@ -284,6 +324,8 @@ If the user is present, show the ranked list before testing. They may have domai
 
 ### 3. Verify Fix
 
+For browser, userscript, DOM, clipboard, permissions-policy, cross-origin, or extension-like bugs: do not stop at jsdom/unit tests when Playwright or another real browser runner is available. Add or run a real-browser regression that exercises the user-visible path before claiming the fix works. See `references/browser-userscript-real-browser-regression.md` for the checklist and pitfalls.
+
 ```bash
 # Run the specific regression test
 pytest tests/test_module.py::test_regression -v
@@ -336,6 +378,28 @@ If you catch yourself thinking:
 **ALL of these mean: STOP. Return to Phase 1.**
 
 **If 3+ fixes failed:** Question the architecture (Phase 4 step 5).
+
+## Merge and Rebase Debugging Addendum
+
+When test failures appear after merging a trunk branch into a long-lived feature branch:
+
+1. **Separate unresolved merge state from real failures first**
+   - Run `git diff --name-only --diff-filter=U` and `git status --short` before debugging tests.
+   - If files are still unmerged, finish conflict resolution and `git add` them before treating test output as final evidence.
+
+2. **Classify failures by boundary shift**
+   - If many tests fail around the same imported service, inspect recent trunk changes for a service-boundary replacement rather than patching each assertion independently.
+   - Common pattern: old test doubles still mock a deprecated gate/helper while production code now imports a new workspace-, tenant-, or entitlement-scoped service.
+   - Fix by mocking the new boundary consistently in affected tests, then update assertions to match the new payload shape.
+
+3. **Preserve domain intent during conflict resolution**
+   - When two branches changed ownership scope (for example user-scoped vs workspace-scoped taxonomy, billing, quota, or tenancy data), do not mechanically choose one side.
+   - Identify the intended owner model, update schema/service/query/test expectations together, and add a reconciliation migration if existing migration history would otherwise leave indexes or ordering scoped to the wrong owner.
+
+4. **Verify both focused and full suites**
+   - Run focused tests around the resolved conflict first.
+   - Then run the project’s full verification command before committing the merge.
+   - Before commit, check staged and unstaged diffs; conflict resolution edits often leave follow-up test fixes unstaged.
 
 ## Common Rationalizations
 
@@ -399,6 +463,18 @@ When fixing bugs:
 2. Debug systematically to find root cause
 3. Fix the root cause (GREEN)
 4. The test proves the fix and prevents regression
+
+## Legacy Admin Regression Notes
+
+For legacy PHP/OpenCart-style admin bugs, treat validators and save handlers as possible mutation paths, not pure checks. When a customer reports "save failed" plus an unexpected state change, inspect recent commits with `git log -S` / `git log -G`, then `git blame` the exact mutation lines. Follow both normal form paths and AJAX/compressed payload paths because validation can run before request data is decoded.
+
+For multi-tenant production bugs, do not validate against a convenient staging/demo tenant when the report names specific customer domains. First reproduce on the exact affected hostnames and compare them to any staging/control host. Capture the route/IP/store identity and the active frontend configuration from the affected page before forming a root-cause hypothesis.
+
+For reCAPTCHA or browser-widget failures, static page HTML is only the first layer. Extract the active `data-sitekey` / `api.js?render` keys from the affected page, then use a real browser to inspect the loaded widget, the browser-created iframe `src`, and visible widget-side errors before concluding whether the key is invalid, domain-blocked, or over quota. Do not rely on a manually assembled Google `api2/anchor` URL as final evidence; it can produce false `Invalid site key` results when parameters differ from the browser request. Treat "no token produced" as upstream evidence before debugging form fields. Keep quota/key state separate from backend validation failures: an over-quota widget or stale key can be a real finding without being the cause of a specific registration error. After key rotation, test only tenants confirmed to have received the new key, and tie any user-facing captcha error to either missing `g-recaptcha-response` or actual backend `siteverify` output before naming root cause. See `references/recaptcha-multi-tenant-production-debugging.md` for the QDM multi-tenant workflow.
+
+- QDM product image-limit/customer complaint example: see `references/qdm-product-image-limit-regression.md`.
+- DOM event delegation / stale global state wrong-item example: see `references/dom-event-delegation-stale-state.md`.
+- reCAPTCHA multi-tenant production probe example: see `references/recaptcha-multi-tenant-production-debugging.md`.
 
 ## Real-World Impact
 

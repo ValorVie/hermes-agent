@@ -194,6 +194,14 @@ A skill exists to make the agent's process more predictable — the agent reliab
 9. **Expecting the current session to see the new skill.** The loader is initialized at session start.
 10. **Letting skills accumulate sediment.** When adding a rule, remove the old wording it replaces.
 
+8. **Letting SKILL.md become a session artifact dump.** Keep the main skill class-level and concise. Move long fallback templates, issue bodies, copied examples, or session-specific detail into support files:
+   - `templates/...` for content meant to be copied and filled in later, such as fallback GitHub issue bodies.
+   - `references/...` for session-specific rationale, evidence, or domain notes.
+   - `scripts/...` for deterministic checks or generators.
+   Add a short pointer in `SKILL.md` that says when to read the support file. Example: if a repository already has GitHub issue forms, make those the primary path and only read `templates/issue/*.md` when the form is unavailable.
+
+9. **Over-narrowing a workflow skill to one planning framework.** If the user wants flexible collaboration docs, phrase the skill around the class of artifact first, then list frameworks as options. Example: "planning/collaboration docs (OpenSpec, Superpowers, Markdown docs, etc.)" instead of making OpenSpec the only valid route. Document allowed locations explicitly when multiple roots are acceptable, such as `openspec`, `dev-docs`, and `docs`.
+
 ## Verification Checklist
 
 - [ ] Tier decided deliberately (bundled bar: 5+ sessions/month; else `optional-skills/`)

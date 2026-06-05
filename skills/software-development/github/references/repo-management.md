@@ -183,6 +183,23 @@ git push origin main
 gh repo sync $GH_USER/repo-name
 ```
 
+### Converting a Public Fork into a Private Non-Fork Mirror
+
+Use this when the user wants a private copy that preserves upstream Git history but must not remain marked as a GitHub fork. See `references/private-mirror-nonfork.md` for the full workflow.
+
+Core safeguards:
+
+1. Save local work first with `git bundle`, `git format-patch`, and `git diff`.
+2. Create an empty private target repo; if the final name is occupied by the existing fork, use a temporary private name.
+3. `git clone --mirror` upstream and `git push --mirror` into the empty private repo.
+4. If GitHub rejects `refs/pull/*` hidden refs, delete those refs from the temporary bare mirror and retry the mirror push.
+5. Repoint local `origin` to the private repo, keep original public repo as `upstream`, push local commits, and verify `visibility=PRIVATE` plus `isFork=false`.
+6. Delete the old fork only after explicit user instruction and final mirror verification; rename the temporary private repo to the final name afterward if needed.
+
+### Private Repo Windows Clone Handoff
+
+After a private mirror or repo migration, users often need an operator-facing Windows clone/run document. Use `references/private-repo-windows-handoff.md` as the checklist: include repo identity, `gh auth`, clone commands, `origin`/`upstream`, runtime setup, launch steps, local data files to avoid committing, update flow, tests, and commit/push of the doc.
+
 ## 4. Repository Information
 
 **With gh:**
