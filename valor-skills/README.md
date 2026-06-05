@@ -1,22 +1,27 @@
-# valor-skills — 本機客製 skill 的版本化來源
+# valor-skills — 已淘汰（客製改為 in-tree）
 
-這個目錄存放 **本機（Valor / OpenClaw）客製過的 bundled skill 權威版本**，獨立於上游 `skills/` 樹之外，所以 `git rebase origin/main` 永遠不會與它衝突。
+> **2026-06-05 起本目錄停用。** 本機客製的 bundled skill 不再放這裡，改為**直接客製上游 `skills/` 樹並 commit 進 `valor-feature` 分支**。
 
-## 為什麼存在
+## 為什麼改
 
-部分上游 bundled skill（如 `kanban-orchestrator`）被本機加了大量機器專屬維運慣例（RockTeam 命名、任務監控流程、通知訂閱偏好等）。`sync_skills` 偵測到 user-modified 會跳過覆蓋，保護客製不被上游蓋掉，但 git 內的 `skills/...` 仍是上游原版 —— 客製只活在 runtime `~/.hermes/skills/`，沒有版本控管，誤刪即失。
+舊作法（valor-skills/）把客製放在上游 `skills/` 樹之外，目標是「`git rebase` 永不衝突」。但這個目標其實是錯的：
 
-本目錄是那份客製的 git 控管副本。
+- **永不衝突 = git 永遠不會告訴你上游對這個 skill 改了什麼**，每次升級還是得手動 diff `valor-skills/` vs `skills/` 才知道要不要合併，沒有省掉判斷工，只是把訊號藏起來。
+- runtime 會被 `sync_skills` 標為 user-modified 並跳過，導致上游更新沉默累積、長期漂移（實測累積到結構性損壞）。
+- 版本化也不完整（如本目錄的 `kanban-orchestrator` 只存了 SKILL.md、沒存它的 5 個 references）。
 
-## 同步方向
+## 新作法（in-tree 客製）
 
-**git (`valor-skills/`) 是權威來源，runtime (`~/.hermes/skills/`) 從它同步。**
+把客製直接改進 `skills/<path>/<name>/`（SKILL.md + references/），commit 進 `valor-feature`。好處：
 
-- 升級流程中若對 runtime 版做了「無衝突自動合併」（吸收上游新段落），合併後要把 runtime 版**複製回對應的 `valor-skills/<name>/` 並 commit**，保持 git 版領先或同步。
-- 詳細流程見 `platform-ops` SKILL 的 `references/hermes/update.md` 補差 #5「自動合併規則」。
+- **rebase 時 git 自己就是合併引擎**：上游改同一行才衝突（= 你要的判斷時機，行級精確），改不同段落自動合併、自動吸收上游內容。
+- **`sync_skills` 不再跳過**：runtime == bundled 後不再是 user-modified，上游更新自動經 sync 傳到 runtime。
+- 客製是對上游的**純新增 diff**，未來 rebase 多數自動合併。
 
-## 目前收錄
+硬約束：**永遠用 `git rebase origin/main`、絕不用 `hermes update`**（後者 `git reset --hard` 會毀掉 valor-feature commit）。
 
-| skill | 對應 runtime 路徑 | 客製內容摘要 |
-|-------|-------------------|--------------|
-| `kanban-orchestrator/` | `~/.hermes/skills/devops/kanban-orchestrator/` | RockTeam 命名慣例、任務 liveness 監控、通知訂閱偏好、cron `every 5m` 陷阱、main-gate 設計 + 上游 goal_mode 段落（已合併） |
+## 純本機 skill（上游沒有的）
+
+若未來有完全自創、上游不存在的 skill，沒有合併對象，可放回本目錄或其他明確標記的位置。目前沒有這類 skill，本目錄保留此說明作為指引。
+
+詳見 `platform-ops` SKILL 的 `references/hermes/update.md`「user-modified skill 紀律」章節。

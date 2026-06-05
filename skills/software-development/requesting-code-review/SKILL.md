@@ -24,6 +24,7 @@ quality gates, an independent reviewer subagent, and an auto-fix loop.
 - When user says "commit", "push", "ship", "done", "verify", or "review before merge"
 - After completing a task with 2+ file edits in a git repo
 - After each task in subagent-driven-development (the two-stage review)
+- After `/custom-simplify` or other cleanup creates uncommitted changes; the reviewer must inspect both the committed range and the working tree diff
 
 **Skip for:** documentation-only changes, pure config tweaks, or when user says "skip verification".
 
@@ -74,6 +75,10 @@ Detect the project language and run the appropriate tools. Capture the failure
 count BEFORE your changes as **baseline_failures** (stash changes, run, pop).
 Only NEW failures introduced by your changes block the commit.
 
+For review-only requests, stay read-only: run validation and inspect diffs, but do not stage, auto-fix, format, or edit files. Include untracked files from `git ls-files --others --exclude-standard` in the review surface; `git diff` alone misses new routes, migrations, tests, and jobs.
+
+If Prisma schema or migrations changed, run `npx --no-install prisma validate` when available. If OpenSpec artifacts changed, run the relevant strict validation command before giving an approve/request-changes verdict.
+
 **Test frameworks** (auto-detect by project files):
 ```bash
 # Python (pytest)
@@ -108,6 +113,35 @@ which go && go vet ./... 2>&1 | tail -10
 
 **Baseline comparison:** If baseline was clean and your changes introduce failures,
 that's a regression. If baseline already had failures, only count NEW ones.
+
+## Browser Automation / Network Isolation Reviews
+
+## Working Tree Coverage
+
+Before dispatching review, capture both the review range and uncommitted state:
+
+```bash
+BASE_SHA=$(git merge-base origin/main HEAD)  # or the intended base branch
+HEAD_SHA=$(git rev-parse HEAD)
+git status --short
+git diff --stat "$BASE_SHA..$HEAD_SHA"
+git diff --stat
+git diff --name-only
+```
+
+Tell the reviewer explicitly when uncommitted cleanup exists. Include instructions to run both `git diff BASE..HEAD` and plain `git diff`; otherwise a reviewer can approve the last commit while missing current worktree fixes.
+
+Important: `git diff` and `git diff --name-only` omit untracked files. If `git status --short` shows `??`, read or summarize those files separately for review and include them in the final `git add`; new regression tests often sit here.
+
+After applying review feedback, rerun the relevant targeted tests, then the broader project-required verification before committing/pushing.
+
+## Browser Automation / Network Isolation Reviews
+
+When review touches Playwright, Browserless, Docker Compose egress controls, SSRF defenses, capture, or scraping flows, load `references/browser-network-isolation-review.md` and require both code-level and runtime evidence. Static review is not enough for network-bound security changes: verify the route guard is installed before any navigation, Compose interpolation is correct, and container-to-container allow/deny probes match the intended boundary.
+
+If Critical or Important feedback required code changes, run a second focused review on the changed diff before committing. The second pass catches regressions introduced by the fix itself.
+
+When review touches debug logging, log retention, rotation, or claims that generated logs are not web-accessible, load `references/log-debugging-release-gates.md`. Static review is not enough: verify untracked helper files are staged, lock files do not violate retention globs, emitted logs are redacted, and HTTP deny evidence is based on an actual existing probe file or server rule.
 
 ## Step 4 — Self-review checklist
 
@@ -271,6 +305,9 @@ tests exist, tests pass, no regressions.
 ## Pitfalls
 
 - **Empty diff** — check `git status`, tell user nothing to verify
+- **Untracked files** — `git diff` will not show them; inspect `??` files from `git status --short`, include new tests/docs in review evidence, and stage them before commit
+- **Glob-based retention checks** — when reviewing bounded log retention, count exactly what the spec names. If a requirement says `foo.log*` must stay under a limit, lock files like `foo.log.lock` also match unless deliberately named outside that glob. Tests must not silently exclude matching files just to pass.
+- **HTTP deny evidence** — a `200 text/html` response for a missing or synthetic log URL is not proof that an actual log file is protected; it may be an application fallback page. Release gates for log inaccessibility require a real temporary probe file in the target log directory or a direct web-server deny rule check.
 - **Not a git repo** — skip and tell user
 - **Large diff (>15k chars)** — split by file, review each separately
 - **delegate_task returns non-JSON** — retry once with stricter prompt, then treat as FAIL

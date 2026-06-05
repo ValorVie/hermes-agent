@@ -63,6 +63,28 @@ Common gateway problems:
 - **Gateway dies on SSH logout**: Enable linger: `sudo loginctl enable-linger $USER`
 - **Gateway dies on WSL2 close**: WSL2 requires `systemd=true` in `/etc/wsl.conf` for systemd services to work. Without it, gateway falls back to `nohup` (dies when session closes).
 - **Gateway crash loop**: Reset the failed state: `systemctl --user reset-failed hermes-gateway`
+- **Gateway loads the wrong `AGENTS.md` / uses the Hermes repo as workspace**:
+  - Design intent:
+    - the gateway service may run from `~/.hermes/hermes-agent`
+    - messaging work should use `MESSAGING_CWD`
+    - `gateway/run.py` copies `MESSAGING_CWD` into `TERMINAL_CWD` when terminal cwd is unset / `.` / `auto`
+    - `run_agent.py` then uses `TERMINAL_CWD` for startup context-file discovery so it does **not** load the Hermes repo's `AGENTS.md`
+  - What to verify:
+    1. `~/.hermes/.env` contains the expected `MESSAGING_CWD=/path/to/workspace`
+    2. `~/.hermes/config.yaml` does **not** pin `terminal.cwd` to the Hermes repo; `.` should fall back to `MESSAGING_CWD` in gateway mode
+    3. `systemctl --user cat hermes-gateway` may still show `WorkingDirectory=~/.hermes/hermes-agent` — this is normal for the service process and is **not** the intended messaging workspace
+    4. inside a fresh Python process, importing `gateway.run` should yield the same workspace for both env vars when the bridge is healthy:
+       ```bash
+       source ~/.hermes/hermes-agent/venv/bin/activate
+       cd ~/.hermes/hermes-agent
+       HERMES_HOME=~/.hermes python - <<'PY'
+       import os, gateway.run
+       print('MESSAGING_CWD=', os.getenv('MESSAGING_CWD'))
+       print('TERMINAL_CWD=', os.getenv('TERMINAL_CWD'))
+       PY
+       ```
+  - Interpretation:
+    - if the import test resolves both vars to the workspace but live tool calls still behave as if cwd is `~/.hermes/hermes-agent`, the live gateway process or an already-created terminal environment is stale/out-of-sync; restart the gateway and re-check before debugging prompt/context loading further
 
 ### Platform-specific issues
 - **Discord bot silent**: Must enable **Message Content Intent** in Bot → Privileged Gateway Intents.

@@ -106,6 +106,12 @@ Confirm:
 - Failure message is expected
 - Fails because the feature is missing
 
+**If the test errors before reaching the behavior under test:**
+- Fix the test boundary first, then re-run until the assertion fails for the intended reason.
+- For platform-bound code exercised on another OS, add narrow test-only import/setup shims for unavailable platform APIs (for example Windows GUI/input modules) rather than skipping the behavior test.
+- Use the repo-declared runner or environment (`uv run`, project venv, package script) before treating missing host dependencies as a blocker.
+- Do not count an import error, missing binary, or wrong interpreter failure as RED; RED is the behavior failing.
+
 **Test passes immediately?** You're testing existing behavior. Fix the test.
 
 **Test errors?** Fix the error, re-run until it fails correctly.
@@ -274,6 +280,16 @@ If you catch yourself doing any of these, delete the code and restart with TDD:
 - "This is different because..."
 
 **All of these mean: Delete code. Start over with TDD.**
+
+## Regression Tests for Output Path Changes
+
+When changing where generated files, debug artifacts, screenshots, logs, or exports are written, write the RED test before touching production code and assert both sides of the contract:
+
+- The expected new path contains the generated file.
+- The old or incorrect path is not created.
+- Existing guard behavior still holds, such as throttling, cleanup limits, or skip behavior.
+
+For example, if changing debug screenshots from `screenshot/` to `screenshots/`, the regression test should fail under the old implementation by checking `screenshots/<file>.png` exists and `screenshot/` does not exist. Then make the smallest production change and rerun the narrow test before the broader suite.
 
 ## Verification Checklist
 
