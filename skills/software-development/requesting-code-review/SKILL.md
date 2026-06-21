@@ -116,6 +116,18 @@ that's a regression. If baseline already had failures, only count NEW ones.
 
 ## Browser Automation / Network Isolation Reviews
 
+### Public widget / embedded iframe / TTS proxy reviews
+
+When reviewing a public widget that loads third-party CDN scripts, embeds an iframe, requests microphone access, or proxies text-to-speech, treat these as security-sensitive even if the feature looks cosmetic.
+
+Checklist:
+- If third-party scripts run inside an iframe, require sandbox isolation; avoid `allow-same-origin` unless there is a documented reason and compensating controls.
+- Validate `postMessage` by both `event.source` and an unguessable per-mount channel token, not by `origin` alone when sandbox opaque origins are involved.
+- Do not let sandboxed widget code directly call sensitive same-origin APIs; parent code should proxy only the minimal allowed operations.
+- TTS endpoints should be disabled by default, use `POST` body instead of GET query for user text, return `Cache-Control: no-store, private`, cap text and audio size, whitelist voices, and fail closed to browser speech fallback.
+- Origin/Referer checks are only CSRF reduction; require an abuse control such as quota/rate limiting. Do not key quota on user-controlled `X-Forwarded-For` unless the deployment proxy is known to overwrite it.
+- Inspect new package lifecycle scripts. Wrapper packages with `preinstall`/`postinstall` scripts may be worse than a small owned protocol implementation.
+
 ## Working Tree Coverage
 
 Before dispatching review, capture both the review range and uncommitted state:
